@@ -111,4 +111,161 @@ static class UpdateMemberResponse {
 - 장점
     - 성능 최적화, 유지 보수, 코드 가독성
 - 단점
-    - 간한단 코드를 복잡하게 구현해야 할 경우가 생길 수 있다.
+    - 간단한 코드를 복잡하게 구현해야 할 경우가 생길 수 있다.
+ 
+<br><br><br><br>
+
+# 섹션 2.  API 개발 고급 - 준비
+
+## 스프링에서 `EntityManager`의 thread-safe를 보장 할 수 있는 이유
+
+- 스프링에서 초기에 `EntityManager`를 주입할 때 프록시 객체로 주입 하고, 사용시에 실제 객체를 생성하여 주입하는 방법을 이용하여 thread-safe를 보장 한다.
+
+## `@PostConstruct`
+
+- 의존성 주입 완료 후 다른 리소스에서 호출하지 않아도 실행시켜 주는 역할
+- 실행 순서
+    - 생성자 호출 → 의존성 주입 완료(`@Autowired` || `@ReuqiredArgsConstructor`) → `@PostConstruct`
+- `@PostConstruct`에서 `@Transactinoal` 처리 시 주의할 점
+    
+    ```java
+    //InitDb.java 잘못된 예
+    
+    /**
+     * 총 주문 2개
+     * * userA
+     *   * JPA1 BOOK
+     *   * JPA2 BOOK
+     * * userB
+     *   * SPRING1 BOOK
+     *   * SPRING2 BOOK
+     */
+    @Component
+    @RequiredArgsConstructor
+    public class InitDb {
+    
+        private final EntityManager em;
+    
+        @PostConstruct
+    		@Transactional
+        public void init() {
+            Member member = new Member();
+            member.setName("userA");
+            member.setAddress(new Address("서울", "1", "1111"));
+            em.persist(member);
+    
+            Book book1 = new Book();
+            book1.setName("JPA1 BOOK");
+            book1.setPrice(10000);
+            book1.setStockQuantity(100);
+            em.persist(book1);
+    
+            Book book2 = new Book();
+            book2.setName("JPA2 BOOK");
+            book2.setPrice(20000);
+            book2.setStockQuantity(200);
+            em.persist(book2);
+    
+            OrderItem orderItem1 = OrderItem.createOrderItem(book1, 10000, 1);
+            OrderItem orderItem2 = OrderItem.createOrderItem(book2, 20000, 2);
+    
+            Delivery delivery = new Delivery();
+            delivery.setAddress(member.getAddress());
+            Order order = Order.createdOrder(member, delivery, orderItem1, orderItem2);
+            em.persist(order);
+        }
+    }
+    ```
+    
+    ```bash
+    //오류 발생
+    
+    Caused by: 
+    	jakarta.persistence.TransactionRequiredException: 
+    		No EntityManager with actual transaction available for current thread 
+    		- cannot reliably process 'persist' call
+    ```
+    
+    - 이러한 오류가 발생하는 이유는 스프링 라이프 사이클로 인해 @PostConstruct가 먼저 실행되고 @Transactional AOP가 적용되기 때문이다. 이때 `@PostConstruct`는 의존성 주입 완료이 완료된 뒤에 실행 된다. 따라서 `EntityManager`에 객체가 주입되어 있다. 하지만 현재 `EntityManager`에는 실제 객체가 주입되어 있는것이 아니라 프록시 객체가 주입되어 있는 상태이기 때문에 위와 같은 에러가 발생한다.
+- ⇒ 초기화하는 메서드와 초기화를 실행하는 메서드 둘로 분리해서 해결하자!
+    
+    ```java
+    //InitDb.java 올바른 예
+    
+    /**
+     * 총 주문 2개
+     * * userA
+     *   * JPA1 BOOK
+     *   * JPA2 BOOK
+     * * userB
+     *   * SPRING1 BOOK
+     *   * SPRING2 BOOK
+     */
+    @Component
+    @RequiredArgsConstructor
+    public class InitDb {
+    
+        private final InitService initService;
+        private final EntityManager em;
+    
+        @PostConstruct
+        public void init() {
+            
+            initService.dbInit1();
+    
+        }
+    
+        @Component
+        @Transactional
+        @RequiredArgsConstructor
+        static class InitService {
+    
+            private final EntityManager em;
+    
+            public void dbInit1() {
+    
+                System.out.println("before - " + em.toString());
+                Member member = new Member();
+                member.setName("userA");
+                member.setAddress(new Address("서울", "1", "1111"));
+                em.persist(member);
+                System.out.println("after - " + em);
+    
+                Book book1 = new Book();
+                book1.setName("JPA1 BOOK");
+                book1.setPrice(10000);
+                book1.setStockQuantity(100);
+                em.persist(book1);
+    
+                Book book2 = new Book();
+                book2.setName("JPA2 BOOK");
+                book2.setPrice(20000);
+                book2.setStockQuantity(200);
+                em.persist(book2);
+    
+                OrderItem orderItem1 = OrderItem.createOrderItem(book1, 10000, 1);
+                OrderItem orderItem2 = OrderItem.createOrderItem(book2, 20000, 2);
+    
+                Delivery delivery = new Delivery();
+                delivery.setAddress(member.getAddress());
+                Order order = Order.createdOrder(member, delivery, orderItem1, orderItem2);
+                em.persist(order);
+            }
+        }
+    
+    }
+    ```
+    
+    - 이렇게 하면 `@PostConstruct` 실행 후에 `initService.dbInit1()`이 실행되고 `initService` 내부의 `@Transactional`이 실행되면서 `EntityManager`에 실제 객체 값이 주입되기 때문에 해결된다.
+
+## 참고
+
+[[Spring] @PostConstruct에서 @Transactional 처리 시 문제점](https://sorjfkrh5078.tistory.com/311)
+
+[스프링과 EntityManager의 동시성 비밀](https://woodcock.tistory.com/35)
+
+[안녕하세요, EntityManager에 대해 궁금한 점이 있어 질문 남깁니다. - 인프런](https://www.inflearn.com/questions/158967/안녕하세요-entitymanager에-대해-궁금한-점이-있어-질문-남깁니다)
+
+<br><br><br><br>
+
+
