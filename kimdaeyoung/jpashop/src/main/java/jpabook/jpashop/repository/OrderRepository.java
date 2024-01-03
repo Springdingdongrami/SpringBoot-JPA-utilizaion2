@@ -31,7 +31,7 @@ public class OrderRepository {
         return em.find(Order.class, id);
     }
 
-    public List<Order> findAll(OrderSearch orderSearch) {
+    public List<Order> findAllByString(OrderSearch orderSearch) {
 
         QOrder order = QOrder.order;
         QMember member = QMember.member;
@@ -44,6 +44,15 @@ public class OrderRepository {
                         nameLike(orderSearch.getMemberName()))
                 .limit(1000)
                 .fetch();
+    }
+
+    public List<Order> findAllWithMemberDelivery() {
+
+        return em.createQuery(
+                "select o from Order o" +
+                        " join fetch o.member m" +
+                        " join fetch o.delivery d", Order.class
+        ).getResultList();
     }
 
     private BooleanExpression statusEq(OrderStatus statusCond) {
@@ -61,5 +70,4 @@ public class OrderRepository {
 
         return member.name.like(nameCond);
     }
-
 }
