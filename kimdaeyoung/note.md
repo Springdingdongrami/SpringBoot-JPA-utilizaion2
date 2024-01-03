@@ -268,4 +268,201 @@ static class UpdateMemberResponse {
 
 <br><br><br><br>
 
+# 섹션 3. API 개발 고급 - 지연 로딩과 조회 성능 최적화
 
+## Could not write JSON: Infinite recursion 에러
+
+```java
+2024-01-03T03:06:48.214+09:00 ERROR 30169 
+--- [nio-8080-exec-1] o.a.c.c.C.[.[.[/].[dispatcherServlet]    : 
+Servlet.service() for servlet [dispatcherServlet] in context 
+with path [] threw exception 
+[Request processing failed: 
+org.springframework.http.converter.HttpMessageNotWritableException: 
+Could not write JSON: Infinite recursion (StackOverflowError)] 
+with root cause
+```
+
+```java
+@Entity
+@Table(name = " orders")
+@Getter
+@NoArgsConstructor(access = AccessLevel.PROTECTED)
+public class Order {
+
+    @Id @GeneratedValue
+    @Column(name = "order_id")
+    private Long id;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "member_id")
+    private Member member
+
+		. . .
+}
+```
+
+```java
+@Entity
+@Getter
+@Setter
+public class Member {
+
+    @Id @GeneratedValue
+    @Column(name = "member_id")
+    private Long id;
+
+    @NotEmpty
+    private String name;
+
+    @Embedded
+    private Address address;
+
+    @OneToMany(mappedBy = "member")
+    private List<Order> orders = new ArrayList<>();
+
+		. . .
+}
+```
+
+- 연관 관계에 있는 엔티티중 하나를 RestController에서JSON 형태로 반환하는 과정에서 recursion 에러가 발생한 상황
+- 엔티티를 JSON으로 변경하면서 직렬화 과정을 거치는데 이때 서로가 참조하면서 무한 재귀가 발생한다.
+- 해결 방법
+    1. 재귀를 발생시키는 필드에 @JsonIgnore를 붙여준다.
+        1. Order를 조회하고 있는 상황이라면 Memberd의 orders에 붙힌다.
+    2. **엔티티를 반환하지 말고 DTO을 사용한다. (권장)**
+
+## Type definition error: 
+[simple type, class org.hibernate.proxy.pojo.bytebuddy.ByteBuddyInterceptor]] 에러
+
+```java
+2024-01-03T03:02:24.675+09:00 ERROR 30132 
+--- [nio-8080-exec-2] o.a.c.c.C.[.[.[/].[dispatcherServlet]    : 
+Servlet.service() for servlet [dispatcherServlet] in context 
+with path [] threw exception [Request processing failed: 
+org.springframework.http.converter.HttpMessageConversionException: 
+Type definition error: 
+[simple type, 
+class org.hibernate.proxy.pojo.bytebuddy.ByteBuddyInterceptor]] 
+with root cause
+```
+
+- 현재 FeatchType.LAZY(지연 로딩)로 설정 되어 있어서 참조 객체들이 프록시 객체(bytebuddy 라이브러리)로 초기화 되어 있다. 엔티티를 JSON으로 변경하기 위해 직렬화 과정을 거치는데 이때 프록시 객체(비어있음)의 직렬화 부분에서 오류가 발생했다.
+- 참조 객체들이 필요할 때 DB에 쿼리를 날려 실제 값을 가져오는 작업이 필요하다. ( == 프록시 객체 초기화 작업 필요)
+- 해결 방법
+    1. 스프링 부트 3.0 미만 - hibernate5Module을 스프링 빈으로 등록
+    2. 스프링 부트 3.0 이상 - Hibernate5JakartaModule을 스프링 빈으로 등록 
+        
+        ```java
+        //Hibernate5JakarataModule 추가
+        	implementation 'com.fasterxml.jackson.datatype:jackson-datatype-hibernate5-jakarta';
+        ```
+        
+        ```java
+        //Application.java에 코드 추가
+        @Bean
+        Hibernate5JakartaModule hibernate5JakartaModule() {
+        	return new Hibernate5JakartaModule();
+        }
+        ```
+        
+    3. **엔티티를 반환하지 말고 DTO을 사용한다. (권장)**
+
+## N + 1 문제
+
+- 연관관계가 설정된 엔티티 사이에서 한 엔티티(1)를 조회했을 때, 조회된 엔티티의 개수만큼 연관된 엔티티(N)를 조회하기 위해 추가적인 쿼리가 발생하는 문제를 의미.
+- 예시 코드
+    
+    ```java
+    @GetMapping("/api/v2/simple-orders")
+    public List<SimpleOrderDto> ordersV2() {
+    
+        // N + 1 -> 1 + 회원 N + 배송 N
+        List<Order> orders = orderRepository.findAllByString(new OrderSearch());
+        List<SimpleOrderDto> result = orders.stream()
+                .map(o -> new SimpleOrderDto(o))
+                .collect(toList());
+        return result;
+    }
+    
+    @Data
+    static class SimpleOrderDto {
+    
+        private Long orderId;
+        private String name;
+        private LocalDateTime orderDate;
+        private OrderStatus orderStatus;
+        private Address address;
+    
+        public SimpleOrderDto(Order order) {
+    
+            orderId = order.getId();
+            name = order.getMember().getName(); //LAZY 초기화
+            orderDate = order.getOrderDate();
+            orderStatus = order.getStatus();
+            address = order.getDelivery().getAddress(); //LAZY 초기화
+        }
+    }
+    ```
+    
+- 해결 방법 - **페치 조인 최적화**
+    - 예시 코드
+    
+    ```java
+    public List<Order> findAllWithMemberDelivery() {
+    
+          return em.createQuery(
+                  "select o from Order o" +
+                          " join fetch o.member m" +
+                          " join fetch o.delivery d", Order.class
+          ).getResultList();
+      }
+    ```
+    
+    - order 엔티티를 페치 조인을 사용하여 쿼리 1번에 member와 delivery도 같이 조회한다. 따라서 지연로딩이 따로 발생하지 않는다.
+    - 엔티티를 조회했기 때문에 모든 정보가 넘어온다.
+    
+    ![image](https://github.com/Springdingdongrami/springboot-JPA-utilization-2/assets/74356213/07c43179-a669-43fa-b249-063ab1a08394)
+
+    
+
+## 페치 조인(Fetch Join)
+
+- JPQL에서 성능 최적화를 위해 제공하는 기능
+- 연관된 엔티티나 컬렉션들을 한번의 SQL 쿼리로 함께 조회 가능
+- N + 1 문제 해결에 효과적
+- 주의 사항
+    - 일대다 또는 다대다 관계의 엔티티가 많이 포함되는 경우 불필요한 중복 데이터가 생기는 일이 발생한다 → **DISTINCT 키워드로 중복 데이터 제거 가능**
+- 지연 로딩의 연관 엔티티 데이터를 자주 사용하는 경우에 쓰는 것이 좋다.
+
+## JPA에서 DTO로 바로 조회
+
+```java
+public List<OrderSimpleQueryDto> findOrderDtos() {
+
+    return em.createQuery("select new " +
+                    "jpabook.jpashop.repository.OrderSimpleQueryDto(o.id, m.name, " +
+                    "o.orderDate, o.status, d.address)" +
+                    " from Order o" +
+            " join o.member m" +
+            " join o.delivery d", OrderSimpleQueryDto.class)
+            .getResultList();
+}
+```
+
+- DTO로 조회했기 때문에 원하는 정보만 선택해서 받을 수 있다. (페치 조인을 했을 때와의 차이점)
+
+![image](https://github.com/Springdingdongrami/springboot-JPA-utilization-2/assets/74356213/a97b1ebb-29f3-49c5-b12b-1d325fe18f10)
+
+
+- SELECT 절에서 원하는 데이터를 직접 선택함으로 디비에서 애플리케이션 네트웍 용량 최적화에 도움이 된다(단, 큰 차이는 없음)
+- 단점 - 리포지토리 재사용성이 떨어짐, API 스펙에 맞춘 코드가 리포지토리에 들어가는 단점
+
+## 쿼리 방식 선택 권장 순서
+
+1. 엔티티를 DTO로 변환하는 방법 선택
+2. 필요할 경우 페치 조인으로 성능 최적화
+3. 여전히 성능 이슈가 있다면 DTO로 직접 조회하는 방법 이용
+4. 마지막 방버으로 JPA의 네이티브 SQL이나 스프링 JDBC Template을 사용해서 SQL을 직접 사용
+
+<br><br><br><br>
