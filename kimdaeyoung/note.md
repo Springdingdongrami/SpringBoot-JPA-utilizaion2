@@ -951,4 +951,80 @@ public class OrderFlatDto {
 
 <br><br><br><br>
 
+# 섹션 5. API 개발 고급 - 실무 필수 최적화
+
+## OSIV란
+
+- Open Session In View
+- 영속성 컨텍스트를 뷰까지 열어두는 기능을 뜻한다.
+- 하이버네이트에서 부르는 명칭, JPA에서는 OEIV(Open EntityManager In View)라고 부른다. 관례상 둘다 OSIV라 부른다.
+- JPA에서 설정 방법 - 기본값 True
+    
+    ```java
+    jpa:
+        open-in-view: false
+    ```
+    
+- OSIV ON
+    
+    ![image](https://github.com/Springdingdongrami/springboot-JPA-utilization-2/assets/74356213/2413dfce-4d87-4dd8-a6e4-ee4dbdbefaba)
+
+    
+    - 애플리케이션 시작 시점에서 warn 로그를 남긴다.
+    
+    ```java
+    2024-01-08T01:31:04.201+09:00  WARN 45519 --- 
+    [  restartedMain] JpaBaseConfiguration$JpaWebConfiguration 
+    	: spring.jpa.open-in-view is enabled by default. 
+    Therefore, database queries may be performed during view rendering. 
+    Explicitly configure spring.jpa.open-in-view to disable this warning
+    ```
+    
+    - OSIV 전략은 트랜잭션 시작처럼 최초 데이터베이스 커넥션 시작부터 API 응답이 끝날 때 까지 영속성 컨텍스트와 데이터베이스 커넥션을 유지함 → View Template이나 API 컨트롤러에서 지연 로딩이 가능했음.
+    - 실시간 트래픽이 중요한 애플리케이션에서는 장애로 이어 질 수 있음. → 커넥션이 모자라는 경우가 발생하기 때문!
+- OSIV OFF
+    
+    ![image](https://github.com/Springdingdongrami/springboot-JPA-utilization-2/assets/74356213/0fb16f68-9864-4590-9a81-85aaa4da4d44)
+
+    
+    - OSIV를 끄면 트랜잭션을 종료할 때 영속성 컨텍스트를 닫고, 데이터베이스 커넥션도 반환한다. → 커넥션 리소스를 낭비하지 않는다.
+    - OSIV를 끄면 모든 지연로딩을 트랜잭션 안에서 처리해야 한다. 따라서 지금까지 작성한 많은 지연 로딩 코드를 트랜잭 션 안으로 넣어야 하는 단점이 있다. 그리고 view template에서 지연로딩이 동작하지 않는다. 결론적으로 트랜잭션이 끝나기 전에 지연 로딩을 강제로 호출해 두어야 한다.
+    - 커멘드와 쿼리 분리 방법
+        - OSIV를 끈 상태로 복잡성을 관리하는 좋은 방법
+        - 예시 1
+            - OrderService : 핵심 비즈니스 로직
+            - OrderQueryService : 화면이나 API에 맞춘 서비스(주로 읽기 전용 트랜잭션 사용)
+        - 예시 2
+            - OrderApiController.java
+            
+            ```java
+            @GetMapping("/api/osiv/orders")
+            public List<OrderDto> ordersOsiv() {
+            
+                return orderQueryService.ordersOsiv();
+            }
+            ```
+            
+            - OrderQueryService
+            
+            ```java
+            @Service
+            @Transactional(readOnly = true)
+            @RequiredArgsConstructor
+            public class OrderQueryService {
+            
+                private final OrderRepository orderRepository;
+            
+                public List<OrderDto> ordersOsiv() {
+            
+                    List<Order> orders = orderRepository.findAllWithItem();
+            
+                    List<OrderDto> result = orders.stream()
+                            .map(o -> new OrderDto(o))
+                            .collect(Collectors.toList());
+            
+                    return result;
+                }
+            }
+            ```
 
