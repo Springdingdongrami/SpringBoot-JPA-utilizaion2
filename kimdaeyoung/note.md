@@ -1,3 +1,5 @@
+[🚀 POSTMAN LINK](https://documenter.getpostman.com/view/29761773/2s9YsJBCcR)
+
 # 섹션 1. API 개발 기본
 
 ## 엔티티를 RequestBody에 직접 매핑해도 될까?
