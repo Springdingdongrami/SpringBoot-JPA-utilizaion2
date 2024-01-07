@@ -12,6 +12,7 @@ spring:
       hibernate:
 #        show_sql: true # system.out에서 보인다
         format_sql: true
+        default_batch_fetch_size: 100
 # log에 기록이 남는다.
 logging:
   level:
