@@ -466,3 +466,489 @@ public List<OrderSimpleQueryDto> findOrderDtos() {
 4. 마지막 방버으로 JPA의 네이티브 SQL이나 스프링 JDBC Template을 사용해서 SQL을 직접 사용
 
 <br><br><br><br>
+
+# 섹션 4. API 개발 고급 - 컬렉션 조회 최적화
+
+# 일대다 관계 조회 관련(OneToMany)
+
+# **Hibernate5, Hibernate6 distinct 차이**
+
+- Hibernate 6에서는 join fetch시 더 이상 sql구문에 distinct를 선언하지 않아도 자동으로 중복을 걸러준다.
+- 예시
+    - Hibernate5 - springboot 2.x
+    
+    ```java
+    public List<Order> findAllWithItem() {
+    
+          return em.createQuery(
+                  "select distinct o from Order o" +
+                          " join fetch o.member m" +
+                          " join fetch o.delivery d" +
+                          " join fetch o.orderItems oi" +
+                          " join fetch oi.item i", Order.class)
+                  .getResultList();
+      }
+    ```
+    
+    - Hibernate6 - springboot 3.x
+    
+    ```java
+    public List<Order> findAllWithItem() {
+    
+          return em.createQuery(
+                  "select o from Order o" +
+                          " join fetch o.member m" +
+                          " join fetch o.delivery d" +
+                          " join fetch o.orderItems oi" +
+                          " join fetch oi.item i", Order.class)
+                  .getResultList();
+      
+    ```
+    
+    - Order response data
+    
+    ```json
+    [
+        {
+            "orderId": 1,
+            "name": "userA",
+            "orderDate": "2024-01-07T04:02:33.369413",
+            "orderStatus": "ORDER",
+            "address": {
+                "city": "서울",
+                "street": "1",
+                "zipcode": "1111"
+            },
+            "orderItems": [
+                {
+                    "itemName": "JPA1 BOOK",
+                    "orderPrice": 10000,
+                    "count": 1
+                },
+                {
+                    "itemName": "JPA2 BOOK",
+                    "orderPrice": 20000,
+                    "count": 2
+                }
+            ]
+        },
+        {
+            "orderId": 2,
+            "name": "userB",
+            "orderDate": "2024-01-07T04:02:33.427993",
+            "orderStatus": "ORDER",
+            "address": {
+                "city": "대구",
+                "street": "2",
+                "zipcode": "2222"
+            },
+            "orderItems": [
+                {
+                    "itemName": "SPRING1 BOOK",
+                    "orderPrice": 30000,
+                    "count": 3
+                },
+                {
+                    "itemName": "SPRING2 BOOK",
+                    "orderPrice": 40000,
+                    "count": 4
+                }
+            ]
+        }
+    ]
+    ```
+    
+    - distanct 유무의 차이가 있지만 둘다 중복을 메모리상에서 걸려서 출력 해 준 것을 볼 수 있다
+    
+
+## 일대다 컬렉션 페치 조인은 사용해도 될까?
+
+- 안된다고 봐야 한다. 이유는 페이징 처리가 불가능해지기 때문!
+- 예시
+    - `findAllWithItem`에서 페이징 처리를 해줬지만 실제 SQL문에서는 limit과 offset이 나타나 있지 않다. WARN 경고를 firstResult와 MaxResult를 collection fetch 와 함께 써서 페이징 처리를 메모리에서 한다고 나와있다. ⇒ 데이터가 많아질 경우 메모리 초과가 발생한다.
+    - 아래 예시를 바탕으로 설명하자면 페치 조인을 했기 때문에  Order값과 실제 DB에서 가져 오는 값이 달라 질 수 있다. 만약 한 주문에 여러 아이템들이 있는 경우 페치 조인에 의해 한 주문 당 주문된 아이템 개수 만큼 값들이 더 생기기 때문이다. 따라서 DB 영역에서는 페이징 처리가 제대로 안되기 때문에 메모리에서 하게 된다.
+
+```java
+public List<Order> findAllWithItem() {
+
+      return em.createQuery(
+              "select distinct o from Order o" +
+                      " join fetch o.member m" +
+                      " join fetch o.delivery d" +
+                      " join fetch o.orderItems oi" +
+                      " join fetch oi.item i", Order.class)
+              .setFirstResult(1)
+              .setMaxResults(100)
+              .getResultList();
+  }
+```
+
+```sql
+select
+        distinct o1_0.order_id,
+        d1_0.delivery_id,
+        d1_0.city,
+        d1_0.street,
+        d1_0.zipcode,
+        d1_0.status,
+        m1_0.member_id,
+        m1_0.city,
+        m1_0.street,
+        m1_0.zipcode,
+        m1_0.name,
+        o1_0.order_date,
+        o2_0.order_id,
+        o2_0.order_item_id,
+        o2_0.count,
+        i1_0.item_id,
+        i1_0.dtype,
+        i1_0.name,
+        i1_0.price,
+        i1_0.stock_quantity,
+        i1_0.artist,
+        i1_0.etc,
+        i1_0.author,
+        i1_0.isbn,
+        i1_0.actor,
+        i1_0.director,
+        o2_0.order_price,
+        o1_0.status 
+    from
+        orders o1_0 
+    join
+        member m1_0 
+            on m1_0.member_id=o1_0.member_id 
+    join
+        delivery d1_0 
+            on d1_0.delivery_id=o1_0.delivery_id 
+    join
+        order_item o2_0 
+            on o1_0.order_id=o2_0.order_id 
+    join
+        item i1_0 
+            on i1_0.item_id=o2_0.item_id
+```
+
+![image](https://github.com/Springdingdongrami/springboot-JPA-utilization-2/assets/74356213/f1ce8bcc-c1c7-4e3b-a3c7-b46a46917977)
+
+
+## 일대다의 컬렉션 패치 조인은 1개만 사용 가능
+
+- 2개 이상 사용시 데이터가 부정합하게 조회될 가능성이 있다.
+    - 데이터가 너무 많아지면서 jpa에서 데이터를 제대로 맞출 수 없게 될 수도 있기 때문이다.
+
+## 일대다 컬렉션 페치 조인시 페이징 문제 해결 방법은?
+
+1. ToOne 관계를 모두 fetch join 한다 → ToOne 관계는 row수를 증가시키지 않기 때문에 페이징 쿼리에 영향을 안준다.
+2. 컬렉션은 지연 로딩(`FetchType.*LAZY`)으로 조회*
+3. hibernate.default_batch_fetch_size, @BatchSize로 지연 로딩 성능 최적화 
+    1. hibernate.default_batch_fetch_size : 글로벌 설정
+    2. @BatchSize : 개별 최적화(세밀하게 설정할 경우 사용)
+    3. 이 옵션 사용시 컬렉션이나 프록시 객체를 한꺼번엔 설정한 size만큼 IN 쿼리로 조회한다.
+- 예시 코드
+    - OrderApiController.java
+    
+    ```java
+    @GetMapping("/api/v3.1/orders")
+    public List<OrderDto> ordersV3Page(@RequestParam(value = "offset", defaultValue = "0") int offset,
+                                       @RequestParam(value = "limit", defaultValue = "100") int limit) {
+    
+        List<Order> orders = orderRepository.findAllWithMemberDelivery(offset, limit);
+    
+        List<OrderDto> result = orders.stream()
+                .map(o -> new OrderDto(o))
+                .collect(Collectors.toList());
+    
+        return result;
+    
+    }
+    ```
+    
+    - OrderRepository.java
+    
+    ```java
+    public List<Order> findAllWithMemberDelivery(int offset, int limit) {
+    
+          return em.createQuery(
+                  "select o from Order o" +
+                          " join fetch o.member m" +
+                          " join fetch o.delivery d", Order.class
+          )
+                  .setFirstResult(offset)
+                  .setMaxResults(limit)
+                  .getResultList();
+      }
+    ```
+    
+    - application.yml
+    
+    ```java
+    spring:
+      jpa:
+        properties:
+          hibernate:
+            default_batch_fetch_size: 1000
+    ```
+    
+- 장점
+    - IN 쿼리로 인해 쿼리 호출 수가 1 + N → 1 + 1로 최적화 된다.
+    - 조인보다 DB 데이터 전송량이 최적화 된다.(Order와 OrderItem을 조인하면 Order가 OrderItem만큼 중복해서 조회된다. → 각각 조회하므로 전송해야할 중복 데이터가 없다.)
+    - 페치 조인 방식과 비교해서 쿼리 호출수는 약간 증가. But, DB 데이터 전송량은 감소.
+    - 컬렉션 패치 조인은 페이징이 불가능. But, 현재 방식은 페이징 가능.
+    - 실행 되는 쿼리문 예시
+        
+        ```sql
+        select o1_0.order_id,d1_0.delivery_id,d1_0.city,d1_0.street,d1_0.zipcode,d1_0.status,m1_0.member_id,m1_0.city,m1_0.street,m1_0.zipcode,m1_0.name,o1_0.order_date,o1_0.status 
+        	from orders o1_0 
+        		join member m1_0 
+        			on m1_0.member_id=o1_0.member_id 
+        		join delivery d1_0 
+        			on d1_0.delivery_id=o1_0.delivery_id 
+        	offset 0 rows fetch first 100 rows only;
+        
+        select o1_0.order_id,o1_0.order_item_id,o1_0.count,o1_0.item_id,o1_0.order_price 
+        	from order_item o1_0 
+        	where o1_0.order_id 
+        		in(1,2);
+        
+        select i1_0.item_id,i1_0.dtype,i1_0.name,i1_0.price,i1_0.stock_quantity,i1_0.artist,i1_0.etc,i1_0.author,i1_0.isbn,i1_0.actor,i1_0.director 
+        	from item i1_0 
+        	where i1_0.item_id 
+        		in(1,2,3,4);
+        ```
+        
+    - 실행되는 쿼리문의 결과
+        
+        ![image](https://github.com/Springdingdongrami/springboot-JPA-utilization-2/assets/74356213/9693f299-7ac1-438c-b31b-bf309e9b4959)
+
+        
+- 결론
+    - ToOne 관계는 페치 조인해도 페이징에 영향을 주지 않는다. 따라서 ToOne 관계는 페치조인으로 쿼리 수 를 줄이고 해결하고, 나머지는 `hibernate.default_batch_fetch_size` 로 최적화 하자.
+- 참고: `default_batch_fetch_size` 의 크기는 적당한 사이즈를 골라야 하는데, 100~1000 사이를 선택하는 것을 권장한다. 이 전략을 SQL IN 절을 사용하는데, 데이터베이스에 따라 IN 절 파라미터를 1000으로 제한하기 도 한다. 1000으로 잡으면 한번에 1000개를 DB에서 애플리케이션에 불러오므로 DB에 순간 부하가 증가할 수 있다. 하지만 애플리케이션은 100이든 1000이든 결국 전체 데이터를 로딩해야 하므로 메모리 사용량이 같다. 1000으로 설정하는 것이 성능상 가장 좋지만, 결국 DB든 애플리케이션이든 순간 부하를 어디까지 견딜 수 있는 지로 결정하면 된다.
+
+## ToMany JPA에서 DTO 직접 조회
+
+- OrderApiController.java
+
+```java
+@GetMapping("/api/v4/orders")
+public List<OrderQueryDto> OrderV4() {
+    return orderQueryRepository.findOrderQueryDtos();
+}
+```
+
+- OrderQueryRepository.java
+
+```java
+@Repository
+@RequiredArgsConstructor
+public class OrderQueryRepository {
+
+    private final EntityManager em;
+
+    public List<OrderQueryDto> findOrderQueryDtos() {
+        List<OrderQueryDto> result = findOrders(); //query 1qjs -> N번
+
+        result.forEach(o -> {
+            List<OrderItemQueryDto> orderItems = findOrderItems(o.getOrderId()); //query N번
+            o.setOrderItems(orderItems);
+        });
+
+        return result;
+
+    }
+
+    private List<OrderItemQueryDto> findOrderItems(Long orderId) {
+
+        return em.createQuery(
+                "select  new jpabook.jpashop.repository.order.query.OrderItemQueryDto(oi.order.id, i.name, oi.orderPrice, oi.count)" +
+                        " from OrderItem oi" +
+                        " join oi.item i" +
+                        " where oi.order.id = :orderId", OrderItemQueryDto.class
+        ).setParameter("orderId", orderId).getResultList();
+    }
+
+    private List<OrderQueryDto> findOrders() {
+        return em.createQuery(
+                "select new jpabook.jpashop.repository.order.query.OrderQueryDto(o.id, m.name,o.orderDate, o.status, d.address)" +
+                        " from Order o" +
+                        " join o.member m" +
+                        " join o.delivery d", OrderQueryDto.class
+        ).getResultList();
+    }
+}
+```
+
+- findOrders 쿼리 하나 실행당 findOrderItems 쿼리 N번 실행
+- ToOne 관계 조회 → ToMany 관계 별도 처리
+    - ToOne 관계는 조인해도 데이터 row수가 증가하지 않음
+    - ToMany관계는 조인하면 row수가 증가함
+
+## ToMany JPA**에서** DTO **직접 조회** - **컬렉션 조회 최적화**
+
+- OrderApiController.java
+
+```java
+@GetMapping("/api/v5/orders")
+public List<OrderQueryDto> OrderV5() {
+    return orderQueryRepository.findAllByDtoOptimization();
+}
+```
+
+- OrderQueryRepository.java
+
+```java
+public List<OrderQueryDto> findAllByDtoOptimization() {
+
+    List<OrderQueryDto> result = findOrders();
+
+    Map<Long, List<OrderItemQueryDto>> orderItemMap = findOrderItemMap(toOrderIds(result));
+
+    result.forEach(o -> o.setOrderItems(orderItemMap.get(o.getOrderId())));
+
+    return result;
+}
+
+private Map<Long, List<OrderItemQueryDto>> findOrderItemMap(List<Long> orderIds) {
+    List<OrderItemQueryDto> orderItems = em.createQuery(
+            "select  new jpabook.jpashop.repository.order.query.OrderItemQueryDto(oi.order.id, i.name, oi.orderPrice, oi.count)" +
+                    " from OrderItem oi" +
+                    " join oi.item i" +
+                    " where oi.order.id in :orderIds", OrderItemQueryDto.class
+    ).setParameter("orderIds", orderIds).getResultList();
+
+    Map<Long, List<OrderItemQueryDto>> orderItemMap = orderItems.stream()
+            .collect(Collectors.groupingBy(orderItemQueryDto -> orderItemQueryDto.getOrderId()));
+    return orderItemMap;
+}
+
+private static List<Long> toOrderIds(List<OrderQueryDto> result) {
+    List<Long> orderIds = result.stream()
+            .map(o -> o.getOrderId())
+            .collect(Collectors.toList());
+    return orderIds;
+}
+```
+
+- ToOne 관계들 먼저 조회 → 얻은 식별자 orderId로 ToMany 관계인 OrderItem을 sql문 IN을 사용하여 한꺼번에 조회
+- MAP을 사용해서 매칭 성능 향상 → O(1)
+- fetch join select 부분의 데이터를 필요한 부분만 뽑아서 사용 가능
+
+## ToMany JPA에서 DTO로 직접 조회, 플랫 데이터 최적화
+
+- OrderApiController.java
+
+```java
+@GetMapping("/api/v6/orders")
+public List<OrderQueryDto> OrderV6() {
+
+    List<OrderFlatDto> flats = orderQueryRepository.findAllByDtoFlat();
+
+    return flats.stream()
+            .collect(Collectors.groupingBy(o -> new OrderQueryDto(o.getOrderId(),
+                            o.getName(), o.getOrderDate(), o.getOrderStatus(), o.getAddress()),
+                    Collectors.mapping(o -> new OrderItemQueryDto(o.getOrderId(),
+                            o.getItemName(), o.getOrderPrice(), o.getCount()), Collectors.toList())
+            )).entrySet().stream()
+            .map(e -> new OrderQueryDto(e.getKey().getOrderId(),
+                    e.getKey().getName(), e.getKey().getOrderDate(), e.getKey().getOrderStatus(),
+                    e.getKey().getAddress(), e.getValue())).collect(Collectors.toList());
+}
+```
+
+- OrderQueryDto.java
+
+```java
+@Data
+@EqualsAndHashCode(of = "orderId")
+public class OrderQueryDto {
+
+    private Long orderId;
+    private String name;
+    private LocalDateTime orderDate;
+    private OrderStatus orderStatus;
+    private Address address;
+    private List<OrderItemQueryDto> orderItems;
+
+    public OrderQueryDto(Long orderId, String name, LocalDateTime orderDate, OrderStatus orderStatus, Address address) {
+        this.orderId = orderId;
+        this.name = name;
+        this.orderDate = orderDate;
+        this.orderStatus = orderStatus;
+        this.address = address;
+        this.orderItems = orderItems;
+    }
+
+    public OrderQueryDto(Long orderId, String name, LocalDateTime orderDate, OrderStatus orderStatus, Address address, List<OrderItemQueryDto> orderItems) {
+        this.orderId = orderId;
+        this.name = name;
+        this.orderDate = orderDate;
+        this.orderStatus = orderStatus;
+        this.address = address;
+        this.orderItems = orderItems;
+    }
+}
+```
+
+- OrderQueryRepository.java
+
+```java
+public List<OrderFlatDto> findAllByDtoFlat() {
+		
+	return em.createQuery(
+	        "select new" +
+	                " jpabook.jpashop.repository.order.query.OrderFlatDto(o.id, m.name, o.orderDate, o.status, d.address, i.name, oi.orderPrice, oi.count)" +
+	                " from Order o" +
+	                " join o.member m" +
+	                " join o.delivery d" +
+	                " join o.orderItems oi" +
+	                " join oi.item i", OrderFlatDto.class
+	).getResultList();
+}
+```
+
+- OrederFlatDto.java
+
+```java
+@Data
+public class OrderFlatDto {
+
+    private Long orderId;
+    private String name;
+    private LocalDateTime orderDate;
+    private OrderStatus orderStatus;
+    private Address address;
+
+    private String ItemName;
+    private int orderPrice;
+    private int count;
+
+    public OrderFlatDto(Long orderId, String name, LocalDateTime orderDate, OrderStatus orderStatus, Address address, String itemName, int orderPrice, int count) {
+        this.orderId = orderId;
+        this.name = name;
+        this.orderDate = orderDate;
+        this.orderStatus = orderStatus;
+        this.address = address;
+        ItemName = itemName;
+        this.orderPrice = orderPrice;
+        this.count = count;
+    }
+}
+```
+
+- 장점]
+    - 한번의 쿼리 실행
+- 단점
+    - 쿼리는 한번이지만 조인으로 인해 DB에서 애플리케이션으로 전달하는 데이터에 중복 데이터가 추가되므로 상황에 따라 “JPA**에서** DTO **직접 조회(v5)”**보다 느릴 수 도 있다.
+    - 애플리케이션에서 추가 작업이 크다.(OrderFlatDto에서 OrderQueryDto로 변환 과정 등)
+    - 원하는 페이징 불가능(디비에서 OrderItem을 기준으로 값을 생성하기 때문)
+
+## 참조
+
+### Hibernate6 distanct
+
+[Hibernate ORM User Guide](https://docs.jboss.org/hibernate/orm/current/userguide/html_single/Hibernate_User_Guide.html#hql-distinct)
+
+<br><br><br><br>
+
+
